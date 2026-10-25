@@ -1,0 +1,13 @@
+D	backend/.env
+
+M	backend/.env
+A	backend/.env.example
+
+A	frontend/.env
+D	frontend/.env.example
+
+A	frontend/.env.example
+
+A	backend/.env
+
+A	backend/.env
