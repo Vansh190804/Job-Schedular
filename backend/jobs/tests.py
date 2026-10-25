@@ -1,18 +1,22 @@
 from datetime import timedelta
 from unittest.mock import patch
+from types import SimpleNamespace
 
-from django.test import TestCase, Client
+from django.test import TestCase
 from django.test import TestCase
 from django.utils import timezone
 from django.contrib.auth import get_user_model
+from django.urls import reverse
+from django.db import IntegrityError, transaction
 
 from jobs.models import Job, JobRun, DispatchOutbox
-from jobs.schedular import dispatch_due_jobs
+from jobs.schedular import dispatch_due_jobs, dispatch_pending_outbox
 
 from jobs.tasks import execute_job
 from jobs.schedular import recover_stale_runs
 
 from rest_framework.test import APIClient, APITestCase
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 from rest_framework import status
 
 
@@ -208,6 +212,76 @@ class SchedulerTests(TestCase):
       self.assertIsNotNone(run.finished_at)
 
 
+    def test_duplicate_scheduled_run_is_rejected(self):
+        job = self.create_one_time_job()
+
+        scheduled_at = job.next_run_at
+
+        JobRun.objects.create(
+          job=job,
+          scheduled_at=scheduled_at,
+        )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+              JobRun.objects.create(
+                job=job,
+                scheduled_at=scheduled_at,
+              )
+
+
+    def test_outbox_remains_pending_when_redis_dispatch_fails(self):
+        job = self.create_one_time_job()
+
+        dispatch_due_jobs()
+
+        outbox = DispatchOutbox.objects.get(run__job=job)
+
+        # simulating fake redis conn failure
+        with patch(
+          "jobs.schedular.execute_job.apply_async",
+           side_effect=ConnectionError("Redis unavailable"),
+        ):
+           dispatch_pending_outbox()
+
+        outbox.refresh_from_db()
+
+        self.assertEqual(
+           outbox.status,
+           DispatchOutbox.Status.PENDING,
+        )
+        self.assertEqual(outbox.attempt, 1)
+        self.assertIn("Redis unavailable", outbox.last_error)
+
+
+    def test_pending_outbox_can_be_dispatched_later(self):
+       job = self.create_one_time_job()
+       dispatch_due_jobs()
+
+       outbox = DispatchOutbox.objects.get(run__job=job)
+
+       # Redis is unavailable.
+       with patch(
+         "jobs.schedular.execute_job.apply_async",
+         side_effect=ConnectionError("Redis unavailable"),
+        ):
+            dispatch_pending_outbox()
+
+       # publishing succeeds.
+       with patch(
+          "jobs.schedular.execute_job.apply_async",
+          return_value=SimpleNamespace(id="test-task-id"),
+        ):
+           dispatch_pending_outbox()
+
+       outbox.refresh_from_db()
+       outbox.run.refresh_from_db()
+
+       self.assertEqual(outbox.status, DispatchOutbox.Status.SENT)
+       self.assertEqual(outbox.attempt, 2)
+       self.assertIsNotNone(outbox.sent_at)
+       self.assertEqual(outbox.run.celery_task_id, "test-task-id")
+
 
 
 class JobAPITests(APITestCase):
@@ -396,3 +470,163 @@ class JobAPITests(APITestCase):
       print(response)
 
       self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+    def test_user_registration(self):
+        payload = {
+            "email": "testuser@example.com",
+            "password": "StrongPassword123!",
+            "password_confirm": "StrongPassword123!"
+        }
+
+        res = self.client.post("/api/auth/register/", data=payload)
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        payload = {
+            "email": "testuser@example.com",
+            "password": "StrongPassword123!",
+            "password_confirm": "StrongPassword123!"
+        }
+
+        res = self.client.post("/api/auth/register/", data=payload)
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data["email"][0], "An account with this email already exists.")
+
+        payload = {
+           "email": "testUser2@example.com",
+           "password": "StrongPassword123!",
+           "password_confirm": "StrongPassword321!"
+        }
+
+        res= self.client.post("/api/auth/register/", data=payload)
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data["password_confirm"][0], "Passwords do not match.")
+
+        payload = {
+           "email": "InvalidEmail",
+           "password": "StrongPassword123!",
+           "password_confirm": "StrongPassword123!"
+        }
+
+        res= self.client.post("/api/auth/register/", data=payload)
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        payload = {
+           "email": "testUser123@gmail.com",
+           "password": "weak",
+           "password_confirm": "weak"
+        }
+
+        res= self.client.post("/api/auth/register/", data=payload)
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+    def test_user_login(self):
+        payload = {
+           "email": "testuser@example.com",
+           "password": "StrongPassword123!",
+           "password_confirm": "StrongPassword123!"
+        }
+
+        res = self.client.post("/api/auth/register/", data=payload)
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        payload = {
+           "email": "testuser@example.com",
+           "password": "StrongPassword123!"
+        }
+
+        res = self.client.post("/api/token/", data=payload)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        payload = {
+           "email": "testuser@example.com",
+           "password": "WrongPassword!"
+        }
+
+        res = self.client.post("/api/token/", data=payload)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data["detail"][0], "Invalid email or password.")
+
+        payload = {
+           "email": "wrongEmail@gmail.com",
+           "password": "StrongPassword123!"
+        }
+
+        res = self.client.post("/api/token/", data=payload)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data["detail"][0], "Invalid email or password.")
+
+        payload = {
+           "email": "testuser@example.com"
+        }
+
+        res = self.client.post("/api/token/", data=payload)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+
+User = get_user_model()
+class GoogleTokenExchangeTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="google_test_user",
+            email="googleuser@example.com",
+            password="TestPassword123!",
+        )
+
+        self.exchange_url = reverse("google-token-exchange")
+
+    @patch("jobs.views.cache.delete")
+    @patch("jobs.views.cache.get")
+    def test_valid_google_code_returns_jwt_tokens(
+        self, mock_cache_get, mock_cache_delete
+    ):
+        # Simulate a temporary code that belongs to this user.
+        mock_cache_get.return_value = self.user.pk
+
+        response = self.client.post(
+            self.exchange_url,
+            {"code": "valid-temporary-google-code"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.assertIn("access", response.data)
+        self.assertIn("refresh", response.data)
+
+        # Confirm the access token belongs to the expected user.
+        access_token = AccessToken(response.data["access"])
+        self.assertEqual(
+            str(access_token["user_id"]),
+            str(self.user.pk),
+        )
+
+        # Confirm the refresh token is valid too.
+        RefreshToken(response.data["refresh"])
+
+        mock_cache_delete.assert_called_once()
+
+    @patch("jobs.views.cache.get")
+    def test_invalid_google_code_is_rejected(self, mock_cache_get):
+        mock_cache_get.return_value = None
+
+        response = self.client.post(
+            self.exchange_url,
+            {"code": "invalid-or-expired-code"},
+            format="json",
+        )
+
+        self.assertIn(
+            response.status_code,
+            [status.HTTP_400_BAD_REQUEST, status.HTTP_401_UNAUTHORIZED],
+        )
+
+        self.assertNotIn("access", response.data)
+        self.assertNotIn("refresh", response.data)

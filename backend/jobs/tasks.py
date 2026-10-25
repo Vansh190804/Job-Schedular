@@ -16,7 +16,7 @@ def add_numbers(a, b):
 @shared_task(bind=True, max_retries=3)
 def execute_job(self, job_id, run_id):
     try: 
-        # to prevent duplicate job runs to diff workers
+        # to prevent populating duplicate job-runs to diff workers
         with transaction.atomic():
             run = (
                 JobRun.objects

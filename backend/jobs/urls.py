@@ -1,5 +1,12 @@
 from django.urls import path
-from .views import JobListCreateView, JobRunListView, JobControlView, google_login, google_callback, GoogleTokenExchangeView
+from .views import (
+    JobListCreateView, 
+    JobRunListView, 
+    JobControlView, 
+    google_login, google_callback, 
+    GoogleTokenExchangeView,
+    RegisterView,
+)
 
 urlpatterns = [
     path("jobs/", JobListCreateView.as_view(), name="job-list-create"),
@@ -24,4 +31,9 @@ urlpatterns = [
         GoogleTokenExchangeView.as_view(),
         name="google-token-exchange",
     ),
+    path(
+        "auth/register/",
+        RegisterView.as_view(),
+        name="register",
+    )
 ]

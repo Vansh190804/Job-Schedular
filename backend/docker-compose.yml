@@ -1,0 +1,112 @@
+
+services: 
+    db:
+      image: postgres:15
+      restart: unless-stopped
+      environment:
+         POSTGRES_USER: job_scheduler_user
+         POSTGRES_PASSWORD: job_scheduler_password
+         POSTGRES_DB: job_scheduler_db
+      ports:
+         - "5432:5432"
+      volumes:
+         - db_data:/var/lib/postgresql/data
+      healthcheck:
+         test: ["CMD-SHELL", "pg_isready -U job_scheduler_user -d job_scheduler_db"]
+         interval: 5s
+         timeout: 5s
+         retries: 10
+    
+
+    redis:
+      image: redis:7-alpine
+      restart: unless-stopped
+      ports:
+        - "6379:6379"
+      healthcheck:
+        test: ["CMD", "redis-cli", "ping"]
+        interval: 5s
+        timeout: 5s
+        retries: 10
+
+    app:
+      build: 
+        context: .
+        dockerfile: Dockerfile
+      restart: unless-stopped
+      environment:
+          DB_NAME: "job_scheduler_db"
+          DB_USER: "job_scheduler_user"
+          DB_PASSWORD: "job_scheduler_password"
+          DB_HOST: "db"
+          DB_PORT: "5432"
+          CELERY_BROKER_URL: "redis://redis:6379/0"
+          CELERY_RESULT_BACKEND: "redis://redis:6379/1"
+          GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET}
+          GOOGLE_OAUTH_REDIRECT_URI: "http://localhost:8000/api/auth/google/callback/"
+          FRONTEND_URL: "http://localhost:5173"
+      ports:
+        - "8000:8000"
+      depends_on:
+        db:
+          condition: service_healthy
+        redis:
+          condition: service_healthy
+    
+
+    worker:
+      build: 
+        context: .
+        dockerfile: Dockerfile
+      restart: unless-stopped
+      command: celery -A schedular_backend worker --loglevel=INFO --pool=solo
+      environment:
+          DB_NAME: "job_scheduler_db"
+          DB_USER: "job_scheduler_user"
+          DB_PASSWORD: "job_scheduler_password"
+          DB_HOST: "db"
+          DB_PORT: "5432"
+          CELERY_BROKER_URL: "redis://redis:6379/0"
+          CELERY_RESULT_BACKEND: "redis://redis:6379/1"
+          GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET}
+          GOOGLE_OAUTH_REDIRECT_URI: "http://localhost:8000/api/auth/google/callback/"
+          FRONTEND_URL: "http://localhost:5173"
+      depends_on:
+        db:
+          condition: service_healthy
+        redis:
+          condition: service_healthy    
+
+
+    beat:
+      build: 
+        context: .
+        dockerfile: Dockerfile
+      restart: unless-stopped
+      command: celery -A schedular_backend beat --loglevel=INFO
+      environment:
+          DB_NAME: "job_scheduler_db"
+          DB_USER: "job_scheduler_user"
+          DB_PASSWORD: "job_scheduler_password"
+          DB_HOST: "db"
+          DB_PORT: "5432"
+          CELERY_BROKER_URL: "redis://redis:6379/0"
+          CELERY_RESULT_BACKEND: "redis://redis:6379/1"
+          GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET}
+          GOOGLE_OAUTH_REDIRECT_URI: "http://localhost:8000/api/auth/google/callback/"
+          FRONTEND_URL: "http://localhost:5173"        
+      depends_on:
+        db:
+          condition: service_healthy
+        redis:
+          condition: service_healthy 
+
+
+volumes: 
+  db_data:
+
+         
+    
